@@ -418,7 +418,7 @@ def get_leaderboard():
     ranking = []
 
     for member in members.values():
-[10/7/2026 1:10 PM] Raissa Munoh Melafah: ranking.append({
+ranking.append({
             "name": member["name"],
             "total": len(member["dates"]),
             "streak": calculate_streak(
@@ -602,7 +602,7 @@ def telegram_webhook():
         # /stats
 
         elif text.startswith("/stats"):
-[10/7/2026 1:10 PM] Raissa Munoh Melafah: dates = get_user_completions(
+ dates = get_user_completions(
                 user["id"]
             )
 
