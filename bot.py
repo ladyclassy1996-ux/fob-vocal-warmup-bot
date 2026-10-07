@@ -1,5 +1,5 @@
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import requests
@@ -21,13 +21,18 @@ DAILY_SECRET = os.environ["DAILY_SECRET"]
 
 TIMEZONE = ZoneInfo("Africa/Douala")
 
+TELEGRAM_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
+
+SUPABASE_HEADERS = {
+    "apikey": SUPABASE_KEY,
+    "Authorization": f"Bearer {SUPABASE_KEY}",
+    "Content-Type": "application/json",
+}
+
 
 # =========================
 # TELEGRAM
 # =========================
-
-TELEGRAM_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
-
 
 def telegram(method, data=None):
     response = requests.post(
@@ -42,27 +47,25 @@ def telegram(method, data=None):
 # SUPABASE
 # =========================
 
-SUPABASE_HEADERS = {
-    "apikey": SUPABASE_KEY,
-    "Authorization": f"Bearer {SUPABASE_KEY}",
-    "Content-Type": "application/json",
-}
-
-
 def supabase_request(method, endpoint, **kwargs):
-    response = requests.request(
+    headers = kwargs.pop("headers", {})
+    
+    final_headers = {
+        **SUPABASE_HEADERS,
+        **headers
+    }
+
+    return requests.request(
         method,
         f"{SUPABASE_URL}/rest/v1/{endpoint}",
-        headers=SUPABASE_HEADERS,
+        headers=final_headers,
         timeout=30,
         **kwargs
     )
 
-    return response
-
 
 # =========================
-# DATE / DAY NUMBER
+# DATE / CHALLENGE DAY
 # =========================
 
 def today():
@@ -70,47 +73,12 @@ def today():
 
 
 def challenge_day():
-    start = datetime.strptime(START_DATE, "%Y-%m-%d").date()
+    start = datetime.strptime(
+        START_DATE,
+        "%Y-%m-%d"
+    ).date()
+
     return (today() - start).days + 1
-
-
-# =========================
-# SEND DAILY MESSAGE
-# =========================
-
-def send_daily_message():
-    if not GROUP_CHAT_ID:
-        return {"error": "GROUP_CHAT_ID is not configured"}
-
-    day = challenge_day()
-
-    keyboard = {
-        "inline_keyboard": [
-            [
-                {
-                    "text": "✅ I COMPLETED TODAY'S WARM-UP",
-                    "callback_data": "completed"
-                }
-            ]
-        ]
-    }
-
-    text = (
-        f"🎤 DAY {day} — 15-MINUTE VOCAL WARM-UP\n\n"
-        "Complete your 15-minute vocal warm-up today.\n\n"
-        "When you are finished, tap the button below "
-        "to record your completion.\n\n"
-        "Let's stay consistent! 🔥"
-    )
-
-    return telegram(
-        "sendMessage",
-        {
-            "chat_id": GROUP_CHAT_ID,
-            "text": text,
-            "reply_markup": keyboard
-        }
-    )
 
 
 # =========================
@@ -118,8 +86,11 @@ def send_daily_message():
 # =========================
 
 def record_completion(user):
+
     user_id = user["id"]
+
     username = user.get("username", "")
+
     full_name = user.get("first_name", "")
 
     if user.get("last_name"):
@@ -137,7 +108,6 @@ def record_completion(user):
         "completions",
         json=data,
         headers={
-            **SUPABASE_HEADERS,
             "Prefer": "resolution=ignore-duplicates"
         }
     )
@@ -146,10 +116,11 @@ def record_completion(user):
 
 
 # =========================
-# USER STATS
+# USER STATISTICS
 # =========================
 
 def get_user_completions(user_id):
+
     response = supabase_request(
         "GET",
         "completions",
@@ -170,23 +141,28 @@ def get_user_completions(user_id):
 
 
 def calculate_streak(dates):
+
     if not dates:
         return 0
 
     date_objects = sorted(
-        datetime.strptime(d, "%Y-%m-%d").date()
+        datetime.strptime(
+            d,
+            "%Y-%m-%d"
+        ).date()
         for d in dates
     )
 
-    streak = 0
-    current = today()
-
     date_set = set(date_objects)
 
+    streak = 0
+
+    current = today()
+
     while current in date_set:
+
         streak += 1
 
-        from datetime import timedelta
         current -= timedelta(days=1)
 
     return streak
@@ -195,7 +171,9 @@ def calculate_streak(dates):
 # =========================
 # LEADERBOARD
 # =========================
-[10/7/2026 12:36 PM] Raissa Munoh Melafah: def leaderboard():
+
+def get_leaderboard():
+
     response = supabase_request(
         "GET",
         "completions",
@@ -213,9 +191,11 @@ def calculate_streak(dates):
     members = {}
 
     for row in rows:
+
         user_id = row["user_id"]
 
         if user_id not in members:
+
             members[user_id] = {
                 "name": row["full_name"],
                 "dates": []
@@ -227,163 +207,84 @@ def calculate_streak(dates):
 
     ranking = []
 
-    for data in members.values():
-        ranking.append({
-            "name": data["name"],
-            "total": len(data["dates"]),
-            "streak": calculate_streak(data["dates"])
+    for member in members.values():
+[10/7/2026 1:04 PM] Raissa Munoh Melafah: ranking.append({
+            "name": member["name"],
+            "total": len(member["dates"]),
+            "streak": calculate_streak(
+                member["dates"]
+            )
         })
 
     ranking.sort(
-        key=lambda x: (x["streak"], x["total"]),
+        key=lambda x: (
+            x["streak"],
+            x["total"]
+        ),
         reverse=True
     )
 
     text = "🏆 FOB VOCAL WARM-UP LEADERBOARD\n\n"
 
-    for i, member in enumerate(ranking[:10], start=1):
+    if not ranking:
+        return text + "No check-ins yet."
+
+    for i, member in enumerate(
+        ranking[:10],
+        start=1
+    ):
+
         text += (
             f"{i}. {member['name']} — "
-            f"{member['total']} days 🔥 {member['streak']}-day streak\n"
+            f"{member['total']} days "
+            f"🔥 {member['streak']}-day streak\n"
         )
-
-    if not ranking:
-        text += "No check-ins yet."
 
     return text
 
 
 # =========================
-# TELEGRAM WEBHOOK
+# DAILY MESSAGE
 # =========================
 
-@app.route("/telegram", methods=["POST"])
-def telegram_webhook():
+def send_daily_message():
 
-    update = request.get_json()
+    if not GROUP_CHAT_ID:
 
-    if not update:
-        return jsonify({"ok": True})
+        return {
+            "error": "GROUP_CHAT_ID is not configured"
+        }
 
-    # Button pressed
-    if "callback_query" in update:
+    day = challenge_day()
 
-        query = update["callback_query"]
-        user = query["from"]
-        callback_id = query["id"]
-
-        if query.get("data") == "completed":
-
-            record_completion(user)
-
-            telegram(
-                "answerCallbackQuery",
+    keyboard = {
+        "inline_keyboard": [
+            [
                 {
-                    "callback_query_id": callback_id,
-                    "text": "✅ Completion recorded!"
+                    "text": "✅ I COMPLETED TODAY'S WARM-UP",
+                    "callback_data": "completed"
                 }
-            )
+            ]
+        ]
+    }
 
-            telegram(
-                "sendMessage",
-                {
-                    "chat_id": query["message"]["chat"]["id"],
-                    "text": (
-                        f"✅ {user.get('first_name', 'Member')} "
-                        "has completed today's vocal warm-up!\n\n"
-                        "🔥 Keep the streak going!"
-                    )
-                }
-            )
-
-        return jsonify({"ok": True})
-
-    # Normal message
-    if "message" in update:
-
-        message = update["message"]
-        text = message.get("text", "")
-        user = message.get("from", {})
-        chat_id = message["chat"]["id"]
-
-        if text.startswith("/start"):
-
-            telegram(
-                "sendMessage",
-                {
-                    "chat_id": chat_id,
-                    "text": (
-                        "🎤 Welcome to the FOB "
-                        "15-Minute Vocal Warm-Up Challenge!\n\n"
-                        "Complete your 15-minute warm-up every day "
-                        "and use the daily button to check in.\n\n"
-                        "Commands:\n"
-                        "/stats — Your statistics\n"
-                        "/leaderboard — Challenge leaderboard"
-                    )
-                }
-            )
-
-        elif text.startswith("/stats"):
-
-            dates = get_user_completions(user["id"])
-            streak = calculate_streak(dates)
-
-            telegram(
-                "sendMessage",
-                {
-                    "chat_id": chat_id,
-                    "text": (
-                        "📊 YOUR VOCAL WARM-UP STATS\n\n"
-                        f"🎤 Days completed: {len(dates)}\n"
-                        f"🔥 Current streak: {streak} days"
-                    )
-                }
-            )
-
-        elif text.startswith("/leaderboard"):
-
-            telegram(
-                "sendMessage",
-                {
-                    "chat_id": chat_id,
-                    "text": leaderboard()
-                }
-            )
-
-    return jsonify({"ok": True})
-[10/7/2026 12:36 PM] Raissa Munoh Melafah: # =========================
-# DAILY POST ENDPOINT
-# =========================
-
-@app.route("/daily", methods=["POST"])
-def daily():
-
-    secret = request.headers.get("X-Daily-Secret")
-
-    if secret != DAILY_SECRET:
-        return jsonify({"error": "Unauthorized"}), 401
-
-    result = send_daily_message()
-
-    return jsonify(result)
-
-
-# =========================
-# HEALTH CHECK
-# =========================
-
-@app.route("/", methods=["GET"])
-def health():
-
-    return "FOB Vocal Warm-Up Bot is running! 🎤"
-
-
-if name == "main":
-
-    port = int(os.environ.get("PORT", 10000))
-
-    app.run(
-        host="0.0.0.0",
-        port=port
+    text = (
+        f"🎤 DAY {day} — "
+        "15-MINUTE VOCAL WARM-UP\n\n"
+        "Complete your 15-minute "
+        "vocal warm-up today.\n\n"
+        "When you are finished, tap "
+        "the button below to check in.\n\n"
+        "Let's stay consistent! 🔥"
     )
+
+    return telegram(
+        "sendMessage",
+        {
+            "chat_id": GROUP_CHAT_ID,
+            "text": text,
+            "reply_markup": keyboard
+        }
+    )
+
+
