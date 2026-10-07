@@ -1,126 +1,389 @@
-import sqlite3
-from datetime import datetime, timezone
+import os
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-)
+import requests
+from flask import Flask, request, jsonify
 
-TOKEN = os.environ["BOT_TOKEN"]
-DB_FILE = "warmup.db"
+app = Flask(name)
+
+# =========================
+# SETTINGS
+# =========================
+
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+SUPABASE_URL = os.environ["SUPABASE_URL"]
+SUPABASE_KEY = os.environ["SUPABASE_KEY"]
+
+GROUP_CHAT_ID = os.environ.get("GROUP_CHAT_ID", "")
+START_DATE = os.environ.get("START_DATE", "2026-10-07")
+DAILY_SECRET = os.environ["DAILY_SECRET"]
+
+TIMEZONE = ZoneInfo("Africa/Douala")
 
 
-def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
+# =========================
+# TELEGRAM
+# =========================
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS completions (
-            user_id INTEGER,
-            username TEXT,
-            full_name TEXT,
-            date TEXT,
-            PRIMARY KEY (user_id, date)
-        )
-    """)
+TELEGRAM_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-    conn.commit()
-    conn.close()
 
+def telegram(method, data=None):
+    response = requests.post(
+        f"{TELEGRAM_URL}/{method}",
+        json=data or {},
+        timeout=30
+    )
+    return response.json()
+
+
+# =========================
+# SUPABASE
+# =========================
+
+SUPABASE_HEADERS = {
+    "apikey": SUPABASE_KEY,
+    "Authorization": f"Bearer {SUPABASE_KEY}",
+    "Content-Type": "application/json",
+}
+
+
+def supabase_request(method, endpoint, **kwargs):
+    response = requests.request(
+        method,
+        f"{SUPABASE_URL}/rest/v1/{endpoint}",
+        headers=SUPABASE_HEADERS,
+        timeout=30,
+        **kwargs
+    )
+
+    return response
+
+
+# =========================
+# DATE / DAY NUMBER
+# =========================
 
 def today():
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return datetime.now(TIMEZONE).date()
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                "✅ I COMPLETED TODAY'S WARM-UP",
-                callback_data="completed"
-            )
+def challenge_day():
+    start = datetime.strptime(START_DATE, "%Y-%m-%d").date()
+    return (today() - start).days + 1
+
+
+# =========================
+# SEND DAILY MESSAGE
+# =========================
+
+def send_daily_message():
+    if not GROUP_CHAT_ID:
+        return {"error": "GROUP_CHAT_ID is not configured"}
+
+    day = challenge_day()
+
+    keyboard = {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "✅ I COMPLETED TODAY'S WARM-UP",
+                    "callback_data": "completed"
+                }
+            ]
         ]
+    }
+
+    text = (
+        f"🎤 DAY {day} — 15-MINUTE VOCAL WARM-UP\n\n"
+        "Complete your 15-minute vocal warm-up today.\n\n"
+        "When you are finished, tap the button below "
+        "to record your completion.\n\n"
+        "Let's stay consistent! 🔥"
+    )
+
+    return telegram(
+        "sendMessage",
+        {
+            "chat_id": GROUP_CHAT_ID,
+            "text": text,
+            "reply_markup": keyboard
+        }
+    )
+
+
+# =========================
+# RECORD COMPLETION
+# =========================
+
+def record_completion(user):
+    user_id = user["id"]
+    username = user.get("username", "")
+    full_name = user.get("first_name", "")
+
+    if user.get("last_name"):
+        full_name += " " + user["last_name"]
+
+    data = {
+        "user_id": user_id,
+        "username": username,
+        "full_name": full_name,
+        "completion_date": str(today())
+    }
+
+    response = supabase_request(
+        "POST",
+        "completions",
+        json=data,
+        headers={
+            **SUPABASE_HEADERS,
+            "Prefer": "resolution=ignore-duplicates"
+        }
+    )
+
+    return response.ok
+
+
+# =========================
+# USER STATS
+# =========================
+
+def get_user_completions(user_id):
+    response = supabase_request(
+        "GET",
+        "completions",
+        params={
+            "user_id": f"eq.{user_id}",
+            "select": "completion_date",
+            "order": "completion_date.asc"
+        }
+    )
+
+    if not response.ok:
+        return []
+
+    return [
+        row["completion_date"]
+        for row in response.json()
     ]
 
-    await update.message.reply_text(
-        "🎤 Welcome to the FOB 15-Minute Vocal Warm-Up Challenge!\n\n"
-        "Complete your 15-minute vocal warm-up every day, "
-        "then press the button below to check in.",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+
+def calculate_streak(dates):
+    if not dates:
+        return 0
+
+    date_objects = sorted(
+        datetime.strptime(d, "%Y-%m-%d").date()
+        for d in dates
     )
 
+    streak = 0
+    current = today()
 
-async def completed(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+    date_set = set(date_objects)
 
-    user = query.from_user
-    date = today()
+    while current in date_set:
+        streak += 1
 
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
+        from datetime import timedelta
+        current -= timedelta(days=1)
 
-    cursor.execute("""
-        INSERT OR IGNORE INTO completions
-        (user_id, username, full_name, date)
-        VALUES (?, ?, ?, ?)
-    """, (
-        user.id,
-        user.username or "",
-        user.full_name,
-        date
-    ))
+    return streak
 
-    conn.commit()
-    conn.close()
 
-    await query.edit_message_text(
-        f"✅ {user.full_name} has checked in for today's "
-        f"15-minute vocal warm-up!\n\n"
-        f"📅 {date}\n"
-        f"🎤 Keep singing!"
+# =========================
+# LEADERBOARD
+# =========================
+[10/7/2026 12:36 PM] Raissa Munoh Melafah: def leaderboard():
+    response = supabase_request(
+        "GET",
+        "completions",
+        params={
+            "select": "user_id,full_name,completion_date",
+            "order": "completion_date.asc"
+        }
     )
 
+    if not response.ok:
+        return "Unable to load leaderboard."
 
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
+    rows = response.json()
 
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
+    members = {}
 
-    cursor.execute(
-        "SELECT COUNT(*) FROM completions WHERE user_id = ?",
-        (user.id,)
+    for row in rows:
+        user_id = row["user_id"]
+
+        if user_id not in members:
+            members[user_id] = {
+                "name": row["full_name"],
+                "dates": []
+            }
+
+        members[user_id]["dates"].append(
+            row["completion_date"]
+        )
+
+    ranking = []
+
+    for data in members.values():
+        ranking.append({
+            "name": data["name"],
+            "total": len(data["dates"]),
+            "streak": calculate_streak(data["dates"])
+        })
+
+    ranking.sort(
+        key=lambda x: (x["streak"], x["total"]),
+        reverse=True
     )
 
-    count = cursor.fetchone()[0]
-    conn.close()
+    text = "🏆 FOB VOCAL WARM-UP LEADERBOARD\n\n"
 
-    await update.message.reply_text(
-        f"📊 YOUR VOCAL WARM-UP STATS\n\n"
-        f"🎤 Days completed: {count}\n"
-        f"🔥 Keep building your streak!"
-    )
+    for i, member in enumerate(ranking[:10], start=1):
+        text += (
+            f"{i}. {member['name']} — "
+            f"{member['total']} days 🔥 {member['streak']}-day streak\n"
+        )
+
+    if not ranking:
+        text += "No check-ins yet."
+
+    return text
 
 
-def main():
-    init_db()
+# =========================
+# TELEGRAM WEBHOOK
+# =========================
 
-    application = Application.builder().token(TOKEN).build()
+@app.route("/telegram", methods=["POST"])
+def telegram_webhook():
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("stats", stats))
-    application.add_handler(
-        CallbackQueryHandler(completed, pattern="^completed$")
-    )
+    update = request.get_json()
 
-    print("FOB Vocal Warm-Up Bot is running...")
+    if not update:
+        return jsonify({"ok": True})
 
-    application.run_polling()
+    # Button pressed
+    if "callback_query" in update:
+
+        query = update["callback_query"]
+        user = query["from"]
+        callback_id = query["id"]
+
+        if query.get("data") == "completed":
+
+            record_completion(user)
+
+            telegram(
+                "answerCallbackQuery",
+                {
+                    "callback_query_id": callback_id,
+                    "text": "✅ Completion recorded!"
+                }
+            )
+
+            telegram(
+                "sendMessage",
+                {
+                    "chat_id": query["message"]["chat"]["id"],
+                    "text": (
+                        f"✅ {user.get('first_name', 'Member')} "
+                        "has completed today's vocal warm-up!\n\n"
+                        "🔥 Keep the streak going!"
+                    )
+                }
+            )
+
+        return jsonify({"ok": True})
+
+    # Normal message
+    if "message" in update:
+
+        message = update["message"]
+        text = message.get("text", "")
+        user = message.get("from", {})
+        chat_id = message["chat"]["id"]
+
+        if text.startswith("/start"):
+
+            telegram(
+                "sendMessage",
+                {
+                    "chat_id": chat_id,
+                    "text": (
+                        "🎤 Welcome to the FOB "
+                        "15-Minute Vocal Warm-Up Challenge!\n\n"
+                        "Complete your 15-minute warm-up every day "
+                        "and use the daily button to check in.\n\n"
+                        "Commands:\n"
+                        "/stats — Your statistics\n"
+                        "/leaderboard — Challenge leaderboard"
+                    )
+                }
+            )
+
+        elif text.startswith("/stats"):
+
+            dates = get_user_completions(user["id"])
+            streak = calculate_streak(dates)
+
+            telegram(
+                "sendMessage",
+                {
+                    "chat_id": chat_id,
+                    "text": (
+                        "📊 YOUR VOCAL WARM-UP STATS\n\n"
+                        f"🎤 Days completed: {len(dates)}\n"
+                        f"🔥 Current streak: {streak} days"
+                    )
+                }
+            )
+
+        elif text.startswith("/leaderboard"):
+
+            telegram(
+                "sendMessage",
+                {
+                    "chat_id": chat_id,
+                    "text": leaderboard()
+                }
+            )
+
+    return jsonify({"ok": True})
+[10/7/2026 12:36 PM] Raissa Munoh Melafah: # =========================
+# DAILY POST ENDPOINT
+# =========================
+
+@app.route("/daily", methods=["POST"])
+def daily():
+
+    secret = request.headers.get("X-Daily-Secret")
+
+    if secret != DAILY_SECRET:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    result = send_daily_message()
+
+    return jsonify(result)
+
+
+# =========================
+# HEALTH CHECK
+# =========================
+
+@app.route("/", methods=["GET"])
+def health():
+
+    return "FOB Vocal Warm-Up Bot is running! 🎤"
 
 
 if name == "main":
-    main()
+
+    port = int(os.environ.get("PORT", 10000))
+
+    app.run(
+        host="0.0.0.0",
+        port=port
+    )
