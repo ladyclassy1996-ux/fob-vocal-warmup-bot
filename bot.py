@@ -208,7 +208,7 @@ def get_leaderboard():
     ranking = []
 
     for member in members.values():
-[10/7/2026 1:10 PM] Raissa Munoh Melafah: import os
+import os
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
